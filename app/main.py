@@ -7,7 +7,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.health import router as health_router
 from app.api.mandates import router as mandates_router
+from app.api.transact import router as transact_router
 from app.core.config import get_settings
+from app.db.base import Base
+from app.db.session import engine
 from app.services.redis_client import close_redis, get_redis
 
 settings = get_settings()
@@ -19,6 +22,16 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Starting ap2-merchant-gateway ...")
+    # Create DB tables (idempotent; Alembic handles migrations in prod)
+    try:
+        # Import models so their metadata is registered on Base
+        import app.models.catalog  # noqa: F401
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("DB tables ensured.")
+    except Exception as exc:
+        logger.warning("DB table creation failed (no Postgres?): %s", exc)
+
     # Warm-up Redis connection
     try:
         await get_redis()
@@ -49,6 +62,7 @@ app.add_middleware(
 
 app.include_router(health_router)
 app.include_router(mandates_router)
+app.include_router(transact_router)
 
 
 @app.get("/", include_in_schema=False)
