@@ -6,6 +6,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.audit import router as audit_router
+from app.api.catalog import router as catalog_router
+from app.api.discovery import router as discovery_router
 from app.api.health import router as health_router
 from app.api.mandates import router as mandates_router
 from app.api.transact import router as transact_router
@@ -67,6 +69,8 @@ app.include_router(health_router)
 app.include_router(mandates_router)
 app.include_router(transact_router)
 app.include_router(audit_router)
+app.include_router(catalog_router)
+app.include_router(discovery_router)
 
 
 @app.get("/", include_in_schema=False)
