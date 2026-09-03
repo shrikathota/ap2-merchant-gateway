@@ -380,10 +380,12 @@ async def http_client(db_engine, fake_redis):
     """
     httpx AsyncClient wired to the FastAPI ASGI app.
 
-    Overrides the get_db dependency to use the in-memory SQLite engine
-    so every request in a test shares the same DB state.
+    Overrides get_db (SQLite) and get_razorpay (mock) so tests run
+    without a real Postgres or Razorpay connection.
     """
+    from unittest.mock import AsyncMock, MagicMock
     from app.db.session import get_db as real_get_db
+    from app.services.razorpay_client import get_razorpay as real_get_razorpay
 
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
 
@@ -396,7 +398,18 @@ async def http_client(db_engine, fake_redis):
                 await session.rollback()
                 raise
 
+    # Minimal Razorpay mock for Phase 3 tests (happy path: always returns a fake order)
+    _rzp_mock = MagicMock()
+    _rzp_mock.create_order = AsyncMock(return_value={
+        "id": "order_P3MOCK0001",
+        "amount": 50_000,
+        "currency": "INR",
+        "status": "created",
+    })
+    _rzp_mock.capture_payment = AsyncMock(return_value={"id": "pay_P3MOCK0001", "status": "captured"})
+
     app.dependency_overrides[real_get_db] = override_get_db
+    app.dependency_overrides[real_get_razorpay] = lambda: _rzp_mock
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         yield client
@@ -443,7 +456,7 @@ class TestTransactEndpoint:
         assert resp.status_code == 200, resp.json()
         data = resp.json()
         assert data["status"] == "APPROVED"
-        assert data["next"] == "proceed_to_settlement"
+        assert data["next"] == "proceed_to_payment_capture"
         assert data["cart_nonce"] == cart.nonce
 
     @pytest.mark.asyncio

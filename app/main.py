@@ -26,6 +26,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         # Import models so their metadata is registered on Base
         import app.models.catalog  # noqa: F401
+        import app.models.transaction  # noqa: F401
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         logger.info("DB tables ensured.")
