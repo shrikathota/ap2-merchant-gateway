@@ -133,7 +133,9 @@ SQLITE_URL = "sqlite+aiosqlite:///:memory:"
 @pytest.fixture
 async def db_engine():
     engine = create_async_engine(SQLITE_URL, echo=False)
+    import app.models.audit  # noqa: F401
     import app.models.catalog  # register models on Base  # noqa: F401
+    import app.models.transaction  # noqa: F401
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield engine

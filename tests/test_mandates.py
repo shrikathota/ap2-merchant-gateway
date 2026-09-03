@@ -27,7 +27,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.db.base import Base
 from app.main import app
 from app.schemas.mandates import CartMandate, IntentMandate, SkuItem
 from app.services.mandates import (
@@ -38,6 +40,8 @@ from app.services.mandates import (
     sign_mandate,
     verify_mandate,
 )
+
+SQLITE_URL = "sqlite+aiosqlite:///:memory:"
 
 
 # ---------------------------------------------------------------------------
@@ -404,9 +408,38 @@ def fake_redis_api():
 
 
 @pytest.fixture
-async def http_client(fake_redis_api) -> AsyncClient:
+async def db_engine():
+    engine = create_async_engine(SQLITE_URL, echo=False)
+    import app.models.audit  # noqa: F401
+    import app.models.catalog  # noqa: F401
+    import app.models.transaction  # noqa: F401
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield engine
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+    await engine.dispose()
+
+
+@pytest.fixture
+async def http_client(fake_redis_api, db_engine) -> AsyncClient:
+    from app.db.session import get_db as real_get_db
+
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    async def override_get_db():
+        async with session_factory() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    app.dependency_overrides[real_get_db] = override_get_db
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         yield client
+    app.dependency_overrides.clear()
 
 
 class TestMandateAPI:

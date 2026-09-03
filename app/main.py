@@ -5,6 +5,7 @@ from collections.abc import AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.audit import router as audit_router
 from app.api.health import router as health_router
 from app.api.mandates import router as mandates_router
 from app.api.transact import router as transact_router
@@ -27,6 +28,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Import models so their metadata is registered on Base
         import app.models.catalog  # noqa: F401
         import app.models.transaction  # noqa: F401
+        import app.models.audit  # noqa: F401
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         logger.info("DB tables ensured.")
@@ -64,6 +66,7 @@ app.add_middleware(
 app.include_router(health_router)
 app.include_router(mandates_router)
 app.include_router(transact_router)
+app.include_router(audit_router)
 
 
 @app.get("/", include_in_schema=False)

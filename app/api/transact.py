@@ -31,17 +31,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
+from app.models.audit import AuditEventType
 from app.models.catalog import PolicyOutcome
 from app.models.transaction import Transaction, TransactionStatus
-from app.schemas.mandates import CartMandate
+from app.schemas.mandates import CartMandate, IntentMandate
 from app.schemas.transact import (
     ConfirmPaymentRequest,
     TransactRequest,
     TransactResponse,
     TransactionStatusResponse,
 )
-from app.schemas.mandates import IntentMandate
 from app.services.alternative_finder import AlternativeFinder
+from app.services.audit import AuditService
 from app.services.catalog import CatalogService
 from app.services.mandates import MandateVerifier, VerificationError, load_intent_mandate
 from app.services.policy_engine import PolicyEngine, PolicyResult
@@ -55,6 +56,7 @@ _verifier = MandateVerifier()
 _policy = PolicyEngine()
 _catalog_svc = CatalogService()
 _alt_finder = AlternativeFinder()
+_audit_svc = AuditService()
 
 # Outcomes that are recoverable: instead of a bare DENIED, we divert the
 # caller to in-stock alternatives via a structured FAILED recovery payload.
@@ -106,6 +108,22 @@ async def _build_recovery_response(
         detail=detail,
         alternatives=alternatives,
     )
+
+    if intent_id is not None:
+        await _audit_svc.write_event(
+            db,
+            event_type=AuditEventType.FAILURE_DIVERTED,
+            intent_id=intent_id,
+            mandate_id=cart.nonce,
+            agent_id=cart.agent_id,
+            payload_snapshot={
+                "status": "FAILED",
+                "reason": outcome.value,
+                "failed_sku": failed_sku,
+                "alternatives": [alt.model_dump() for alt in alternatives],
+                "requires_new_mandate": True,
+            },
+        )
 
     return TransactResponse(
         status="FAILED",
@@ -178,6 +196,30 @@ async def transact(
             cart_nonce=cart.nonce,
         )
 
+    # Phase 2 succeeded: signature verified, expiry/category checked, and the
+    # budget ceiling (total_amount_paise <= intent.max_amount_paise) was
+    # enforced as part of MandateVerifier.verify_cart. Record both checkpoints.
+    await _audit_svc.write_event(
+        db,
+        event_type=AuditEventType.CART_VERIFIED,
+        intent_id=intent_id,
+        mandate_id=cart.nonce,
+        agent_id=cart.agent_id,
+        payload_snapshot={
+            "cart_nonce": cart.nonce,
+            "sku_count": len(cart.sku_list),
+            "total_amount_paise": cart.total_amount_paise,
+        },
+    )
+    await _audit_svc.write_event(
+        db,
+        event_type=AuditEventType.BUDGET_PASSED,
+        intent_id=intent_id,
+        mandate_id=cart.nonce,
+        agent_id=cart.agent_id,
+        payload_snapshot={"total_amount_paise": cart.total_amount_paise},
+    )
+
     # ------------------------------------------------------------------ #
     # Fetch IntentMandate for policy engine                               #
     # ------------------------------------------------------------------ #
@@ -222,6 +264,15 @@ async def transact(
             cart_nonce=cart.nonce,
             intent_id=intent_id,
         )
+
+    await _audit_svc.write_event(
+        db,
+        event_type=AuditEventType.POLICY_PASSED,
+        intent_id=intent_id,
+        mandate_id=cart.nonce,
+        agent_id=cart.agent_id,
+        payload_snapshot={"sku_count": len(cart.sku_list), "outcome": policy_result.outcome.value},
+    )
 
     # ------------------------------------------------------------------ #
     # Phase 4 — Atomic stock decrement (race-condition guard)             #
@@ -269,6 +320,18 @@ async def transact(
             notes=notes,
         )
         razorpay_order_id: str = rzp_order["id"]
+        await _audit_svc.write_event(
+            db,
+            event_type=AuditEventType.ORDER_CREATED,
+            intent_id=intent_id,
+            mandate_id=cart.nonce,
+            agent_id=cart.agent_id,
+            payload_snapshot={
+                "razorpay_order_id": razorpay_order_id,
+                "amount_paise": cart.total_amount_paise,
+                "receipt": receipt,
+            },
+        )
     except Exception as exc:
         # Razorpay call failed — roll back stock
         logger.error("Razorpay order creation failed cart=%r: %s", cart.nonce, exc)
@@ -361,6 +424,18 @@ async def confirm_payment(
             "Transaction SETTLED order=%r payment=%r amount=%d",
             order_id, body.payment_id, txn.amount_paise,
         )
+        await _audit_svc.write_event(
+            db,
+            event_type=AuditEventType.SETTLED,
+            intent_id=txn.intent_id,
+            mandate_id=txn.cart_nonce,
+            agent_id=txn.agent_id,
+            payload_snapshot={
+                "razorpay_order_id": order_id,
+                "razorpay_payment_id": body.payment_id,
+                "amount_paise": txn.amount_paise,
+            },
+        )
     except Exception as exc:
         # Capture failed — mark FAILED and roll back stock
         logger.error("Payment capture failed order=%r payment=%r: %s", order_id, body.payment_id, exc)
@@ -384,6 +459,25 @@ async def confirm_payment(
     await db.flush()
 
     return _txn_to_response(txn)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/transact — list all transactions (dashboard table)
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/transact",
+    response_model=list[TransactionStatusResponse],
+    summary="List all transactions, most recent first",
+)
+async def list_transactions(
+    db: AsyncSession = Depends(get_db),
+    limit: int = 100,
+) -> list[TransactionStatusResponse]:
+    stmt = select(Transaction).order_by(Transaction.created_at.desc()).limit(limit)
+    result = await db.execute(stmt)
+    txns = result.scalars().all()
+    return [_txn_to_response(t) for t in txns]
 
 
 # ---------------------------------------------------------------------------

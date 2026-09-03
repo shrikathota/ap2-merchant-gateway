@@ -10,24 +10,29 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
 from starlette import status as _status
 
 # Starlette >= 0.46 renamed 422 to HTTP_422_UNPROCESSABLE_CONTENT
 _422 = getattr(_status, "HTTP_422_UNPROCESSABLE_CONTENT", 422)
 
+from app.db.session import get_db
+from app.models.audit import AuditEventType
 from app.schemas.mandates import (
     CartMandateVerifyRequest,
     CartVerifyResponse,
     IntentMandateCreate,
     IntentMandateResponse,
 )
+from app.services.audit import AuditService
 from app.services.mandates import MandateVerifier, VerificationError
 
 router = APIRouter(prefix="/api/mandates", tags=["mandates"])
 logger = logging.getLogger(__name__)
 
 _verifier = MandateVerifier()
+_audit_svc = AuditService()
 
 
 @router.post(
@@ -36,7 +41,10 @@ _verifier = MandateVerifier()
     status_code=201,
     summary="Register a pre-signed IntentMandate",
 )
-async def register_intent(body: IntentMandateCreate) -> IntentMandateResponse:
+async def register_intent(
+    body: IntentMandateCreate,
+    db: AsyncSession = Depends(get_db),
+) -> IntentMandateResponse:
     """
     Accept a user-signed IntentMandate and store it in Redis.
 
@@ -53,6 +61,19 @@ async def register_intent(body: IntentMandateCreate) -> IntentMandateResponse:
     except Exception as exc:
         logger.exception("Unexpected error registering intent mandate")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    await _audit_svc.write_event(
+        db,
+        event_type=AuditEventType.INTENT_VERIFIED,
+        intent_id=intent_id,
+        mandate_id=intent_id,
+        payload_snapshot={
+            "user_id": body.mandate.user_id,
+            "max_amount_paise": body.mandate.max_amount_paise,
+            "allowed_categories": body.mandate.allowed_categories,
+            "expires_at": body.mandate.expires_at.isoformat(),
+        },
+    )
 
     return IntentMandateResponse(
         intent_id=intent_id,

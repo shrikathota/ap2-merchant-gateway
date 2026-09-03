@@ -78,6 +78,7 @@ def make_cart_payload(priv, intent_nonce, sku="BOOK-001", qty=1, unit_price=50_0
 @pytest.fixture
 async def db_engine():
     engine = create_async_engine(SQLITE_URL, echo=False)
+    import app.models.audit  # noqa: F401
     import app.models.catalog  # noqa: F401
     import app.models.transaction  # noqa: F401
     async with engine.begin() as conn:
