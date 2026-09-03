@@ -85,6 +85,7 @@ class PolicyOutcome(str, enum.Enum):
     CATEGORY_VIOLATION = "CATEGORY_VIOLATION"
     CURRENCY_MISMATCH = "CURRENCY_MISMATCH"
     MANDATE_INVALID = "MANDATE_INVALID"   # cryptographic / structural failure
+    FAILURE_DIVERTED = "FAILURE_DIVERTED"  # recoverable failure diverted to alternatives
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +123,9 @@ class PolicyEvaluation(Base):
     catalog_unit_price_paise: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     requested_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
     available_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # JSON-serialized recovery payload (alternatives etc.) for FAILURE_DIVERTED rows
+    recovery_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     evaluated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False

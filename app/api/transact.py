@@ -40,6 +40,8 @@ from app.schemas.transact import (
     TransactResponse,
     TransactionStatusResponse,
 )
+from app.schemas.mandates import IntentMandate
+from app.services.alternative_finder import AlternativeFinder
 from app.services.catalog import CatalogService
 from app.services.mandates import MandateVerifier, VerificationError, load_intent_mandate
 from app.services.policy_engine import PolicyEngine, PolicyResult
@@ -52,6 +54,11 @@ logger = logging.getLogger(__name__)
 _verifier = MandateVerifier()
 _policy = PolicyEngine()
 _catalog_svc = CatalogService()
+_alt_finder = AlternativeFinder()
+
+# Outcomes that are recoverable: instead of a bare DENIED, we divert the
+# caller to in-stock alternatives via a structured FAILED recovery payload.
+_RECOVERABLE_OUTCOMES = {PolicyOutcome.INSUFFICIENT_INVENTORY, PolicyOutcome.PRICE_DRIFT}
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +67,56 @@ _catalog_svc = CatalogService()
 
 def _sku_qty_pairs(cart: CartMandate) -> list[tuple[str, int]]:
     return [(item.sku, item.qty) for item in cart.sku_list]
+
+
+async def _build_recovery_response(
+    db: AsyncSession,
+    *,
+    cart: CartMandate,
+    intent_id: str | None,
+    intent: IntentMandate,
+    failed_sku: str,
+    outcome: PolicyOutcome,
+    detail: str,
+) -> TransactResponse:
+    """
+    Build a structured FAILED recovery response for a recoverable failure
+    (INSUFFICIENT_INVENTORY / PRICE_DRIFT): no funds moved, no order created —
+    the caller is handed in-stock alternatives and must submit a new mandate.
+    Also writes the FAILURE_DIVERTED audit event.
+    """
+    line = next((item for item in cart.sku_list if item.sku == failed_sku), None)
+    category = line.category if line is not None else ""
+    reference_price = line.unit_price_paise if line is not None else None
+
+    alternatives = await _alt_finder.find_alternatives(
+        db,
+        failed_sku=failed_sku,
+        category=category,
+        max_amount_paise=intent.max_amount_paise,
+        reference_price_paise=reference_price,
+    )
+
+    await _catalog_svc.write_failure_diverted(
+        db,
+        cart=cart,
+        intent_id=intent_id,
+        failed_sku=failed_sku,
+        outcome=outcome,
+        detail=detail,
+        alternatives=alternatives,
+    )
+
+    return TransactResponse(
+        status="FAILED",
+        reason=outcome.value,
+        reason_detail=detail,
+        cart_nonce=cart.nonce,
+        intent_id=intent_id,
+        failed_sku=failed_sku,
+        alternatives=alternatives,
+        requires_new_mandate=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +205,16 @@ async def transact(
             "DENIED cart=%r reason=%s sku=%r",
             cart.nonce, policy_result.outcome, policy_result.offending_sku,
         )
+        if policy_result.outcome in _RECOVERABLE_OUTCOMES and policy_result.offending_sku:
+            return await _build_recovery_response(
+                db,
+                cart=cart,
+                intent_id=intent_id,
+                intent=intent,
+                failed_sku=policy_result.offending_sku,
+                outcome=policy_result.outcome,
+                detail=policy_result.detail,
+            )
         return TransactResponse(
             status="DENIED",
             reason=policy_result.outcome.value,
@@ -174,12 +241,14 @@ async def transact(
             available_qty=0,
         )
         await _catalog_svc.write_evaluation(db, cart=cart, intent_id=intent_id, result=race_result)
-        return TransactResponse(
-            status="DENIED",
-            reason="INSUFFICIENT_INVENTORY",
-            reason_detail=race_result.detail,
-            cart_nonce=cart.nonce,
+        return await _build_recovery_response(
+            db,
+            cart=cart,
             intent_id=intent_id,
+            intent=intent,
+            failed_sku=exc.sku,
+            outcome=PolicyOutcome.INSUFFICIENT_INVENTORY,
+            detail=race_result.detail,
         )
 
     # ------------------------------------------------------------------ #

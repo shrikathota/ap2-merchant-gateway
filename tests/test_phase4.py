@@ -418,8 +418,10 @@ class TestTransactPhase4:
             "agent_public_key_b64": pub_b64,
             "intent_public_key_b64": pub_b64,
         })
-        assert resp.json()["status"] == "DENIED"
+        # Phase 5: recoverable failures return a structured FAILED payload, not DENIED
+        assert resp.json()["status"] == "FAILED"
         assert resp.json()["reason"] == "INSUFFICIENT_INVENTORY"
+        assert resp.json()["requires_new_mandate"] is True
         mock_razorpay.create_order.assert_not_called()
 
 
@@ -616,13 +618,13 @@ class TestStockRaceCondition:
             statuses = [r.json()["status"] for r in results]
             reasons = [r.json().get("reason") for r in results]
 
-            # Exactly one APPROVED, one DENIED
+            # Exactly one APPROVED, one FAILED (recoverable INSUFFICIENT_INVENTORY)
             assert statuses.count("APPROVED") == 1, f"Expected 1 APPROVED, got: {statuses}"
-            assert statuses.count("DENIED") == 1, f"Expected 1 DENIED, got: {statuses}"
+            assert statuses.count("FAILED") == 1, f"Expected 1 FAILED, got: {statuses}"
 
-            # The denial reason must be INSUFFICIENT_INVENTORY
-            denied_reason = reasons[statuses.index("DENIED")]
-            assert denied_reason == "INSUFFICIENT_INVENTORY", f"Got: {denied_reason}"
+            # The failure reason must be INSUFFICIENT_INVENTORY
+            failed_reason = reasons[statuses.index("FAILED")]
+            assert failed_reason == "INSUFFICIENT_INVENTORY", f"Got: {failed_reason}"
 
             # Final stock must be 0 (decremented by the winner)
             factory = async_sessionmaker(db_engine, expire_on_commit=False)

@@ -478,7 +478,8 @@ class TestTransactEndpoint:
         })
         assert resp.status_code == 200, resp.json()
         data = resp.json()
-        assert data["status"] == "DENIED"
+        # Phase 5: recoverable failures return a structured FAILED payload
+        assert data["status"] == "FAILED"
         assert data["reason"] == "INSUFFICIENT_INVENTORY"
 
     @pytest.mark.asyncio
@@ -501,7 +502,8 @@ class TestTransactEndpoint:
         })
         assert resp.status_code == 200, resp.json()
         data = resp.json()
-        assert data["status"] == "DENIED"
+        # Phase 5: recoverable failures return a structured FAILED payload
+        assert data["status"] == "FAILED"
         assert data["reason"] == "PRICE_DRIFT"
 
     @pytest.mark.asyncio
@@ -609,7 +611,10 @@ class TestTransactEndpoint:
 
         async with session_factory() as s:
             result = await s.execute(
-                select(PolicyEvaluation).where(PolicyEvaluation.cart_nonce == cart.nonce)
+                select(PolicyEvaluation).where(
+                    PolicyEvaluation.cart_nonce == cart.nonce,
+                    PolicyEvaluation.outcome == PolicyOutcome.INSUFFICIENT_INVENTORY,
+                )
             )
             row = result.scalars().first()
 

@@ -49,20 +49,39 @@ class TransactRequest(BaseModel):
         return v
 
 
+class AlternativeProduct(BaseModel):
+    """One in-stock substitute suggested by the alternative-recovery engine."""
+    sku: str
+    name: str
+    price_paise: int
+    stock_qty: int
+    similarity_reason: str
+
+
 class TransactResponse(BaseModel):
     """
     Response from POST /api/transact.
 
     On APPROVED, razorpay_order_id is populated with the real Razorpay order ID.
     Call POST /api/transact/{razorpay_order_id}/confirm-payment to settle.
+
+    On FAILED (recoverable failure — INSUFFICIENT_INVENTORY / PRICE_DRIFT), the
+    response carries a structured recovery payload: failed_sku, a ranked list of
+    in-stock alternatives, and requires_new_mandate=True (the agent must submit a
+    new CartMandate against one of the alternatives; no funds moved, no order made).
     """
-    status: str                          # "APPROVED" | "DENIED"
-    reason: str | None = None            # machine-readable reason code on denial
+    status: str                          # "APPROVED" | "DENIED" | "FAILED"
+    reason: str | None = None            # machine-readable reason code on denial/failure
     reason_detail: str | None = None     # human-readable detail
     next: str | None = None              # guidance string
     cart_nonce: str | None = None
     intent_id: str | None = None
     razorpay_order_id: str | None = None # populated on APPROVED
+
+    # Recovery payload — populated on FAILED (INSUFFICIENT_INVENTORY / PRICE_DRIFT)
+    failed_sku: str | None = None
+    alternatives: list[AlternativeProduct] | None = None
+    requires_new_mandate: bool | None = None
 
 
 class ConfirmPaymentRequest(BaseModel):
