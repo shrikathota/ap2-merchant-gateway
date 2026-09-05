@@ -215,6 +215,48 @@ class TestAuditChainHappyPath:
         assert settled_event["payload_snapshot"]["razorpay_payment_id"] == "pay_PHASE6TEST"
 
     @pytest.mark.asyncio
+    async def test_capture_rejected_writes_terminal_audit_event(self, http_client, db_engine, mock_razorpay):
+        """
+        When payment capture fails, the chain must not silently trail off after
+        ORDER_CREATED — a CAPTURE_REJECTED event should close it out, mirroring
+        SETTLED on the success path.
+        """
+        mock_razorpay.capture_payment = AsyncMock(side_effect=Exception("Payment declined"))
+        priv, pub_b64 = make_keypair()
+        await seed_product(db_engine, sku="BOOK-001", price=50_000, stock=5)
+        intent_payload, intent_nonce = await register_intent(http_client, priv, pub_b64)
+        cart_payload, _ = make_cart_payload(priv, intent_nonce)
+
+        r = await http_client.post("/api/transact", json={
+            "cart_mandate_json": cart_payload,
+            "agent_public_key_b64": pub_b64,
+            "intent_public_key_b64": pub_b64,
+        })
+        order_id = r.json()["razorpay_order_id"]
+
+        r2 = await http_client.post(f"/api/transact/{order_id}/confirm-payment", json={
+            "payment_id": "pay_DECLINED001"
+        })
+        assert r2.json()["status"] == "FAILED"
+
+        chain_resp = await http_client.get(f"/api/audit/{intent_nonce}")
+        data = chain_resp.json()
+        event_types = [e["event_type"] for e in data["events"]]
+
+        assert event_types == [
+            "INTENT_VERIFIED",
+            "CART_VERIFIED",
+            "BUDGET_PASSED",
+            "POLICY_PASSED",
+            "ORDER_CREATED",
+            "CAPTURE_REJECTED",
+        ]
+        rejected = next(e for e in data["events"] if e["event_type"] == "CAPTURE_REJECTED")
+        assert rejected["payload_snapshot"]["razorpay_order_id"] == order_id
+        assert rejected["payload_snapshot"]["attempted_payment_id"] == "pay_DECLINED001"
+        assert "Payment declined" in rejected["payload_snapshot"]["reason"]
+
+    @pytest.mark.asyncio
     async def test_audit_latest_returns_most_recent_intent(self, http_client, db_engine, mock_razorpay):
         priv, pub_b64 = make_keypair()
         await seed_product(db_engine, sku="BOOK-001", price=50_000, stock=10)

@@ -118,7 +118,16 @@ class SkuChoice(BaseModel):
 
 
 def pick_sku_with_llm(goal: str, catalog: list[dict], model_name: str) -> SkuChoice:
-    from langchain_google_genai import ChatGoogleGenerativeAI
+    # Uses the google-genai SDK directly rather than langchain_google_genai: as of
+    # Google's Sept-2026 rollout of "Auth key" (AQ.-prefixed) API keys, the
+    # langchain wrapper's transport rejects those keys with a 401
+    # ACCESS_TOKEN_TYPE_UNSUPPORTED error even though the key itself is valid —
+    # confirmed by the same key working fine against both the raw REST API and
+    # this SDK. Tracked upstream at https://discuss.ai.google.dev (search
+    # "ACCESS_TOKEN_TYPE_UNSUPPORTED"); revisit once langchain_google_genai ships
+    # a fix.
+    from google import genai
+    from google.genai import types
 
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
@@ -127,10 +136,8 @@ def pick_sku_with_llm(goal: str, catalog: list[dict], model_name: str) -> SkuCho
             "without --force-failure, e.g.:  export GEMINI_API_KEY=...  "
             "(get one at https://aistudio.google.com/apikey)"
         )
-    os.environ.setdefault("GOOGLE_API_KEY", api_key)
 
-    llm = ChatGoogleGenerativeAI(model=model_name, temperature=0, google_api_key=api_key)
-    structured_llm = llm.with_structured_output(SkuChoice)
+    client = genai.Client(api_key=api_key)
 
     catalog_json = json.dumps(catalog, indent=2)
     prompt = (
@@ -142,7 +149,16 @@ def pick_sku_with_llm(goal: str, catalog: list[dict], model_name: str) -> SkuCho
         f"Catalog:\n{catalog_json}\n\n"
         f"Buyer goal: {goal!r}\n"
     )
-    return structured_llm.invoke(prompt)
+    resp = client.models.generate_content(
+        model=model_name,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            temperature=0,
+            response_mime_type="application/json",
+            response_schema=SkuChoice,
+        ),
+    )
+    return SkuChoice.model_validate_json(resp.text)
 
 
 def fallback_heuristic_pick(catalog: list[dict], goal: str) -> SkuChoice:

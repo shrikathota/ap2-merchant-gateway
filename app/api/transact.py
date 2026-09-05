@@ -442,6 +442,20 @@ async def confirm_payment(
         txn.status = TransactionStatus.FAILED
         txn.failure_reason = str(exc)
 
+        await _audit_svc.write_event(
+            db,
+            event_type=AuditEventType.CAPTURE_REJECTED,
+            intent_id=txn.intent_id,
+            mandate_id=txn.cart_nonce,
+            agent_id=txn.agent_id,
+            payload_snapshot={
+                "razorpay_order_id": order_id,
+                "attempted_payment_id": body.payment_id,
+                "reason": str(exc) or "capture rejected by gateway",
+                "amount_paise": txn.amount_paise,
+            },
+        )
+
         # Reconstruct sku_qty pairs from the original cart for rollback
         # (We stored cart_nonce; we can re-derive from the mandate... but simpler:
         #  store cart line items in the Transaction. For now, we load from a

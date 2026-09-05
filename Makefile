@@ -14,6 +14,9 @@ db-down:
 dev:
 	poetry run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
+dev-demo:
+	poetry run python scripts/run_demo_server.py --host 0.0.0.0 --port 8000
+
 seed:
 	poetry run python scripts/seed_catalog.py
 

@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     secret_key: str = "change_me_to_a_random_secret_at_least_32_chars"
 
     # Database
-    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/ap2_gateway"
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5433/ap2_gateway"
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"

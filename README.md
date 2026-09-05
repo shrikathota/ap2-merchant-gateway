@@ -191,20 +191,41 @@ npm run dev    # http://localhost:5173 — proxies /api to :8000, zero config
 ```
 
 ### 4. The buyer agent (the actual demo)
-```bash
-python agent/buyer_agent.py --goal "running shoes, size 9, under 3000"
-python agent/buyer_agent.py --force-failure   # deliberately picks an out-of-stock
-                                               # SKU to show the recovery path live
-```
-Watch either run land on the dashboard in real time. Each phase prints a labeled
-banner (`PHASE: 1 · DISCOVERY`, `PHASE: 5 · RECOVERY`, ...) for narration.
 
-To settle a **real** captured payment (rather than a synthetic ID a real gateway
-correctly refuses to capture), complete one Razorpay Checkout test-mode payment
-by hand and pass it through:
+There are two ways to run the server, depending on which outcome you want to see —
+**both exercise the exact same mandate signing, policy engine, stock decrement,
+recovery engine, and audit ledger.** The only thing that differs is whether the
+Razorpay calls are real.
+
+**Demo run — always ends `✅ SETTLED`.** Razorpay is faked (order creation and
+payment capture both auto-succeed); Gemini is still real. Use this to show the
+happy path and the recovery path end-to-end without needing a manual checkout step:
+```bash
+python scripts/run_demo_server.py          # instead of uvicorn — port 8000
+# in another terminal:
+python agent/buyer_agent.py --goal "running shoes, size 9, under 3000"
+python agent/buyer_agent.py --force-failure   # OOS SKU → recovery → still settles
+```
+
+**Real run — proves the actual Razorpay integration.** A genuinely real test-mode
+order gets created (check it in your Razorpay Dashboard → Test Mode), but
+capture is correctly **rejected** — `❌ FAILED` / `CAPTURE_REJECTED` on the
+timeline — because the demo doesn't drive an actual checkout, and a real gateway
+correctly refuses to capture a payment that never happened:
+```bash
+uvicorn app.main:app --reload --port 8000     # the real server (make dev)
+# in another terminal:
+python agent/buyer_agent.py --goal "running shoes, size 9, under 3000"
+python agent/buyer_agent.py --force-failure
+```
+To make the real run end `SETTLED` too, complete one Razorpay Checkout
+test-mode payment by hand and pass the real payment ID through:
 ```bash
 python agent/buyer_agent.py --goal "..." --payment-id pay_xxxxxxxxxxxxx
 ```
+
+Watch any of the above land on the dashboard in real time. Each phase prints a
+labeled banner (`PHASE: 1 · DISCOVERY`, `PHASE: 5 · RECOVERY`, ...) for narration.
 
 ### 5. Tests
 ```bash
@@ -212,7 +233,7 @@ pytest -v
 ```
 
 ### Makefile shortcuts (if you use Poetry)
-`make db-up` · `make dev` · `make seed` · `make test` · `make lint` — see [Makefile](Makefile).
+`make db-up` · `make dev` · `make dev-demo` · `make seed` · `make test` · `make lint` — see [Makefile](Makefile).
 
 ---
 
@@ -263,6 +284,6 @@ That last one is the one I'd point to first: **testing against a real gateway in
 
 ## Known limitations
 
-- **Payment capture isn't scripted end-to-end.** Razorpay (by design, even in test mode) requires an actual Checkout flow with a real payment before it can be captured — a backend script can't fabricate that, and shouldn't be able to. Order *creation* is verified for real against Razorpay's API; capture needs one manual test-mode checkout (`--payment-id` flag above), matching how a real production agent would never own the capture step either — that's the checkout widget's job.
+- **Payment capture isn't scripted end-to-end against the real Razorpay API.** Razorpay (by design, even in test mode) requires an actual Checkout flow with a real payment before it can be captured — a backend script can't fabricate that, and shouldn't be able to. Order *creation* is verified for real against Razorpay's API; capture needs one manual test-mode checkout (`--payment-id` flag above), matching how a real production agent would never own the capture step either — that's the checkout widget's job. `scripts/run_demo_server.py` sidesteps this for demo purposes by faking only the Razorpay client (see "Running it" above) — everything else in that mode is still real.
 - **Revenue-growth surface is thin.** This build leans almost entirely on the "make a merchant transactable" half of the track; the upsell-first ranking in the recovery path is the one place it touches revenue growth directly. No conversational checkout or campaign orchestrator yet.
 - **Single merchant, demo-scale catalog** (34 SKUs / 5 categories) — enough to make the recovery and upsell logic behave realistically, not a production catalog depth test.

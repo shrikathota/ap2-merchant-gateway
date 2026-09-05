@@ -6,6 +6,7 @@ export const EVENT_META = {
   ORDER_CREATED: { icon: '📦', color: 'border-amber-500/50 bg-amber-500/10 text-amber-300', dot: 'bg-amber-400' },
   SETTLED: { icon: '✅', color: 'border-green-500/50 bg-green-500/10 text-green-300', dot: 'bg-green-400' },
   FAILURE_DIVERTED: { icon: '🔀', color: 'border-rose-500/50 bg-rose-500/10 text-rose-300', dot: 'bg-rose-400' },
+  CAPTURE_REJECTED: { icon: '🚫', color: 'border-red-500/50 bg-red-500/10 text-red-300', dot: 'bg-red-400' },
 }
 
 export const DEFAULT_META = {
