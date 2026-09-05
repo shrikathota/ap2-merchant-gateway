@@ -209,8 +209,12 @@ class TestTransactRecoveryPayload:
             assert alt["price_paise"] <= 1_000_000
             assert "similarity_reason" in alt and alt["similarity_reason"]
 
-        # Closest price match (45_000 vs mandate price 50_000) ranked first
-        assert alternatives[0]["sku"] == "BOOK-ALT1"
+        # Upsell candidates (priced above the mandate's 50_000, still in-budget)
+        # rank first, closest markup first; ALT1 (cheaper) ranks last.
+        assert [a["sku"] for a in alternatives] == ["BOOK-ALT2", "BOOK-ALT3", "BOOK-ALT1"]
+        assert alternatives[0]["is_upsell"] is True
+        assert alternatives[0]["revenue_delta_paise"] == 5_000
+        assert alternatives[-1]["is_upsell"] is False
 
         # No Razorpay order created
         mock_razorpay.create_order.assert_not_called()
@@ -310,11 +314,17 @@ class TestAlternativeFinder:
         assert skus == {"A"}
 
     @pytest.mark.asyncio
-    async def test_ranked_by_closest_price_and_capped_at_three(self, db_engine, session):
-        await seed_product(db_engine, sku="P1", price=40_000, stock=1, category="books")
-        await seed_product(db_engine, sku="P2", price=53_000, stock=1, category="books")
-        await seed_product(db_engine, sku="P3", price=48_000, stock=1, category="books")
-        await seed_product(db_engine, sku="P4", price=90_000, stock=1, category="books")
+    async def test_upsell_ranked_before_downsell_capped_at_three(self, db_engine, session):
+        """
+        Upsell candidates (priced above the reference, still in-budget) rank
+        first, closest markup first; downsell candidates rank after, closest
+        match first. The top-3 cap can push out a downsell candidate even
+        when it's the closest match overall.
+        """
+        await seed_product(db_engine, sku="P1", price=40_000, stock=1, category="books")  # downsell, -10000
+        await seed_product(db_engine, sku="P2", price=53_000, stock=1, category="books")  # upsell, +3000
+        await seed_product(db_engine, sku="P3", price=48_000, stock=1, category="books")  # downsell, -2000
+        await seed_product(db_engine, sku="P4", price=90_000, stock=1, category="books")  # upsell, +40000
 
         from app.services.alternative_finder import AlternativeFinder
         finder = AlternativeFinder()
@@ -322,8 +332,24 @@ class TestAlternativeFinder:
             session, failed_sku="X", category="books", max_amount_paise=200_000,
             reference_price_paise=50_000,
         )
-        assert [r.sku for r in results] == ["P3", "P2", "P1"]  # closest to 50_000 first
-        assert len(results) == 3  # top-3 cap (P4 excluded)
+        assert [r.sku for r in results] == ["P2", "P4", "P3"]  # P1 (closest downsell) capped out
+        assert len(results) == 3
+        assert [r.is_upsell for r in results] == [True, True, False]
+        assert [r.revenue_delta_paise for r in results] == [3_000, 40_000, -2_000]
+
+    @pytest.mark.asyncio
+    async def test_no_reference_price_falls_back_to_cheapest_first(self, db_engine, session):
+        await seed_product(db_engine, sku="Q1", price=40_000, stock=1, category="books")
+        await seed_product(db_engine, sku="Q2", price=20_000, stock=1, category="books")
+        await seed_product(db_engine, sku="Q3", price=30_000, stock=1, category="books")
+
+        from app.services.alternative_finder import AlternativeFinder
+        finder = AlternativeFinder()
+        results = await finder.find_alternatives(
+            session, failed_sku="X", category="books", max_amount_paise=200_000,
+        )
+        assert [r.sku for r in results] == ["Q2", "Q3", "Q1"]
+        assert all(r.is_upsell is False and r.revenue_delta_paise == 0 for r in results)
 
     @pytest.mark.asyncio
     async def test_excludes_failed_sku_itself(self, db_engine, session):

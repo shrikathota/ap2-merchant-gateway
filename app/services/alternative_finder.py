@@ -8,9 +8,12 @@ AlternativeFinder.find_alternatives(session, *, failed_sku, category, max_amount
     -> list[AlternativeProduct]
 
 Query: same category, stock_qty > 0, price_paise <= max_amount_paise,
-excluding the failed SKU itself, ranked by closest absolute price match to
-the failed SKU's mandate price (or the cheapest in-budget items if no
-reference price is available). Returns the top 3.
+excluding the failed SKU itself. A failure is also a revenue opportunity:
+candidates priced *above* the failed SKU's reference price (still within the
+buyer's authorized budget) are ranked first as upsell offers, closest markup
+first; candidates priced at or below it are ranked after, closest match
+first. Falls back to plain cheapest-first when no reference price is
+available. Returns the top 3.
 """
 from __future__ import annotations
 
@@ -36,9 +39,11 @@ class AlternativeFinder:
     ) -> list[AlternativeProduct]:
         """
         Return up to *limit* in-stock products from *category* that fit within
-        *max_amount_paise*, ranked by closest price match to
-        *reference_price_paise* (falls back to cheapest-first when no reference
-        price is available).
+        *max_amount_paise*. When *reference_price_paise* is known, upsell
+        candidates (priced above it, still in-budget) are ranked first —
+        closest markup first — followed by same-or-cheaper candidates ranked
+        by closest match. Falls back to plain cheapest-first when no
+        reference price is available.
         """
         stmt = select(Product).where(
             Product.category == category,
@@ -50,20 +55,30 @@ class AlternativeFinder:
         candidates: list[Product] = list(result.scalars().all())
 
         if reference_price_paise is not None:
-            candidates.sort(key=lambda p: abs(p.unit_price_paise - reference_price_paise))
+            candidates.sort(
+                key=lambda p: (
+                    0 if p.unit_price_paise > reference_price_paise else 1,
+                    abs(p.unit_price_paise - reference_price_paise),
+                )
+            )
         else:
             candidates.sort(key=lambda p: p.unit_price_paise)
 
-        return [
-            AlternativeProduct(
-                sku=p.sku,
-                name=p.name,
-                price_paise=p.unit_price_paise,
-                stock_qty=p.stock_qty,
-                similarity_reason=self._similarity_reason(p, category, reference_price_paise),
+        alternatives = []
+        for p in candidates[:limit]:
+            delta = p.unit_price_paise - reference_price_paise if reference_price_paise is not None else 0
+            alternatives.append(
+                AlternativeProduct(
+                    sku=p.sku,
+                    name=p.name,
+                    price_paise=p.unit_price_paise,
+                    stock_qty=p.stock_qty,
+                    similarity_reason=self._similarity_reason(p, category, reference_price_paise),
+                    is_upsell=delta > 0,
+                    revenue_delta_paise=delta,
+                )
             )
-            for p in candidates[:limit]
-        ]
+        return alternatives
 
     @staticmethod
     def _similarity_reason(
@@ -74,5 +89,6 @@ class AlternativeFinder:
         delta = product.unit_price_paise - reference_price_paise
         if delta == 0:
             return f"same category ({category}), same price"
-        direction = "cheaper" if delta < 0 else "more expensive"
-        return f"same category ({category}), {abs(delta)} paise {direction}"
+        if delta > 0:
+            return f"same category ({category}), {delta} paise more expensive (upsell)"
+        return f"same category ({category}), {abs(delta)} paise cheaper"

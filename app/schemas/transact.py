@@ -56,6 +56,8 @@ class AlternativeProduct(BaseModel):
     price_paise: int
     stock_qty: int
     similarity_reason: str
+    is_upsell: bool = False
+    revenue_delta_paise: int = 0
 
 
 class TransactResponse(BaseModel):

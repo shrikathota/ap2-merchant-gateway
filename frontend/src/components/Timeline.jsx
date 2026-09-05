@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { metaFor } from '../eventMeta'
+import AlternativesList from './AlternativesList'
 import JsonPayload from './JsonPayload'
 
 function formatTime(ts) {
@@ -51,6 +52,9 @@ function EventRow({ event, isLast }) {
             <dt className="text-zinc-500">mandate_id</dt>
             <dd className="font-mono break-all">{event.mandate_id ?? '—'}</dd>
           </dl>
+          {event.event_type === 'FAILURE_DIVERTED' && (
+            <AlternativesList alternatives={event.payload_snapshot?.alternatives} />
+          )}
           <JsonPayload value={event.payload_snapshot} />
         </div>
       )}

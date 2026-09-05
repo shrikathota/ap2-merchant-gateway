@@ -10,8 +10,9 @@ mandates, and completing (or recovering from a failed) purchase.
 Pipeline (each stage prints a "PHASE" banner for live narration):
 
   1. DISCOVERY        GET /.well-known/agent-commerce.json + GET /api/catalog
-  2. SKU SELECTION     Gemini 2.5 Flash picks a SKU matching the natural-
-                        language goal (skipped in --force-failure mode,
+  2. SKU SELECTION     Gemini (flash tier, model configurable via
+                        --gemini-model) picks a SKU matching the
+                        natural-language goal (skipped in --force-failure mode,
                         where an out-of-stock SKU is deliberately chosen
                         instead, to demonstrate the recovery path).
   3. MANDATE SIGNING   Ed25519-sign an IntentMandate (simulating the human's
@@ -70,7 +71,7 @@ from app.services.mandates import sign_mandate  # noqa: E402
 from langgraph.graph import END, StateGraph  # noqa: E402
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +218,7 @@ class AgentState(TypedDict, total=False):
     force_failure: bool
     base_url: str
     gemini_model: str
+    payment_id: str | None
     client: httpx.Client
 
     catalog: list[dict]
@@ -234,7 +236,7 @@ class AgentState(TypedDict, total=False):
     transact_response: dict
     order_id: str
     attempt: int
-    outcome: str  # "settled" | "denied" | "error"
+    outcome: str  # "settled" | "capture_rejected" | "denied"
     error: str | None
 
 
@@ -382,16 +384,30 @@ def node_settle(state: AgentState) -> dict:
     order_id = result["razorpay_order_id"]
     ok(f"order APPROVED: razorpay_order_id={order_id}")
 
-    payment_id = f"pay_DEMO_{uuid.uuid4().hex[:12]}"
+    payment_id = state.get("payment_id") or f"pay_DEMO_{uuid.uuid4().hex[:12]}"
     resp = client.post(
         f"{base_url}/api/transact/{order_id}/confirm-payment",
         json={"payment_id": payment_id},
     )
     resp.raise_for_status()
     txn = resp.json()
-    ok(f"payment confirmed: status={txn['status']} payment_id={payment_id}")
     log(f"view this flow live: GET {base_url}/api/audit/{state['intent_id']}")
 
+    if txn["status"] != "SETTLED":
+        fail(f"payment capture REJECTED by gateway: status={txn['status']} "
+             f"reason={txn.get('failure_reason')!r}")
+        warn(
+            "This is expected against a REAL Razorpay account: payment_id "
+            f"{payment_id!r} is synthetic (this demo doesn't drive an actual "
+            "checkout), and a real gateway correctly refuses to capture a "
+            "payment that doesn't exist. Order CREATION was still real — "
+            "check it in the Razorpay Dashboard. To settle for real, pass "
+            "--payment-id with an ID captured via an actual Razorpay Checkout "
+            "test-mode payment."
+        )
+        return {"order_id": order_id, "outcome": "capture_rejected", "error": txn.get("failure_reason")}
+
+    ok(f"payment confirmed: status={txn['status']} payment_id={payment_id}")
     return {"order_id": order_id, "outcome": "settled"}
 
 
@@ -408,11 +424,13 @@ def node_recover(state: AgentState) -> dict:
 
     log(f"merchant offered {len(alternatives)} alternative(s):")
     for alt in alternatives:
+        tag = " 💰 upsell" if alt.get("is_upsell") else ""
         log(f"    - {alt['sku']} · {alt['name']} · ₹{alt['price_paise']/100:.2f} "
-            f"· stock={alt['stock_qty']} · {alt['similarity_reason']}")
+            f"· stock={alt['stock_qty']} · {alt['similarity_reason']}{tag}")
 
     top = alternatives[0]
-    ok(f"automatically retrying with top-ranked alternative: {top['sku']!r}")
+    ok(f"automatically retrying with top-ranked alternative: {top['sku']!r}"
+       + (" (upsell — higher basket value than the original request)" if top.get("is_upsell") else ""))
 
     new_cart = build_and_sign_cart(
         state["agent_priv"],
@@ -491,6 +509,14 @@ def main() -> int:
     )
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Merchant gateway base URL")
     parser.add_argument("--gemini-model", default=DEFAULT_GEMINI_MODEL, help="Gemini model name")
+    parser.add_argument(
+        "--payment-id", default=None,
+        help=(
+            "Real Razorpay payment_id to capture (from an actual Checkout test-mode "
+            "payment). Omit to use a synthetic id, which only settles against a "
+            "mocked Razorpay client — a real gateway will correctly reject it."
+        ),
+    )
     args = parser.parse_args()
 
     print("AP2 Buyer Agent — LangGraph demo")
@@ -505,6 +531,7 @@ def main() -> int:
             "gemini_model": args.gemini_model,
             "client": client,
             "attempt": 0,
+            "payment_id": args.payment_id,
         }
         try:
             final_state = graph.invoke(initial_state, config={"recursion_limit": 25})
@@ -513,10 +540,15 @@ def main() -> int:
             return 1
 
     print("\n" + "=" * 78)
-    if final_state.get("outcome") == "settled":
+    outcome = final_state.get("outcome")
+    if outcome == "settled":
         print(f"RESULT: ✅ SETTLED — order_id={final_state['order_id']}")
         return 0
-    print(f"RESULT: ❌ {final_state.get('outcome', 'unknown').upper()} — {final_state.get('error')}")
+    if outcome == "capture_rejected":
+        print(f"RESULT: ⚠ ORDER CREATED (real) but payment capture REJECTED — "
+              f"order_id={final_state['order_id']} reason={final_state.get('error')}")
+        return 2
+    print(f"RESULT: ❌ {str(outcome or 'unknown').upper()} — {final_state.get('error')}")
     return 1
 
 

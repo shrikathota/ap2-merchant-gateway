@@ -1,4 +1,4 @@
-﻿.PHONY: dev test db-up db-down lint format install
+﻿.PHONY: dev test db-up db-down lint format install seed
 
 install:
 	poetry install
@@ -13,6 +13,9 @@ db-down:
 
 dev:
 	poetry run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+seed:
+	poetry run python scripts/seed_catalog.py
 
 test:
 	poetry run pytest tests/ -v --tb=short
